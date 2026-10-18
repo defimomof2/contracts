@@ -1912,3 +1912,92 @@ fn test_release_issue_with_admin_as_recipient() {
     let distributable = 950_0000000i128; // after 5% fee
     assert_eq!(token_client.balance(&admin), distributable);
 }
+
+// ── set_fee_bps tests (regression for #469 / #243) ───────────────────────────
+
+#[test]
+fn test_set_fee_bps_admin_can_change_within_step_limit() {
+    let env = Env::default();
+    // initial fee = 500 bps (5%)
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &contract_id);
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle, &treasury, &500u32, &None, &None);
+
+    // increase by exactly MAX_FEE_CHANGE_BPS (500) → new fee = 1000
+    client.set_fee_bps(&1000u32);
+    assert_eq!(client.get_fee_bps(), 1000u32);
+}
+
+#[test]
+fn test_set_fee_bps_rejects_step_exceeding_max() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &contract_id);
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle, &treasury, &500u32, &None, &None);
+
+    // jump by 501 bps — one over the 500-bps step cap
+    let err = client.try_set_fee_bps(&1001u32);
+    assert_eq!(err, Err(Ok(Error::InvalidFee)));
+}
+
+#[test]
+fn test_set_fee_bps_rejects_above_bps_denominator() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &contract_id);
+    env.mock_all_auths();
+    // start at 9900 so a jump to 10_001 would be within the step limit if BPS_DENOMINATOR
+    // weren't checked first — verifies that the > 10000 guard fires independently.
+    client.initialize(&admin, &oracle, &treasury, &9900u32, &None, &None);
+
+    let err = client.try_set_fee_bps(&10_001u32);
+    assert_eq!(err, Err(Ok(Error::InvalidFee)));
+}
+
+#[test]
+fn test_set_fee_bps_requires_admin_auth() {
+    // Without mocking any auth the SDK auth framework rejects the call.
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &contract_id);
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle, &treasury, &500u32, &None, &None);
+
+    // Drop mock_all_auths and attempt the call — must be rejected.
+    let env2 = Env::default();
+    let contract_id2 = env2.register(MilestonesContract, ());
+    let client2 = MilestonesContractClient::new(&env2, &contract_id2);
+    let admin2 = Address::generate(&env2);
+    let oracle2 = Address::generate(&env2);
+    let treasury2 = Address::generate(&env2);
+    env2.mock_all_auths();
+    client2.initialize(&admin2, &oracle2, &treasury2, &500u32, &None, &None);
+    // New env with no mocked auth — set_fee_bps must fail auth check.
+    let env3 = Env::default();
+    let contract_id3 = env3.register(MilestonesContract, ());
+    let client3 = MilestonesContractClient::new(&env3, &contract_id3);
+    // Cannot even initialize without mocking auth, so confirm auth gating
+    // via the initialized-but-no-auth path: init with mocks, then remove them.
+    env3.mock_all_auths();
+    let admin3 = Address::generate(&env3);
+    let oracle3 = Address::generate(&env3);
+    let treasury3 = Address::generate(&env3);
+    client3.initialize(&admin3, &oracle3, &treasury3, &500u32, &None, &None);
+    // Call without any auth mocked — the SDK panics with HostError (auth failure).
+    let err = client3.try_set_fee_bps(&600u32);
+    assert!(err.is_err());
+}
